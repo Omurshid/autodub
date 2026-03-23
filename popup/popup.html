@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <h1 class="logo">DubIt</h1>
+    <p class="tagline">AI Video Dubbing</p>
+
+    <div id="no-video" class="state" style="display:none;">
+      <p>No video detected on this page</p>
+    </div>
+
+    <div id="main-controls" class="state">
+      <button id="toggle-btn" class="toggle-btn">
+        <span class="btn-icon">&#9654;</span>
+        <span class="btn-text">Start Dubbing</span>
+      </button>
+      <div id="status" class="status"></div>
+    </div>
+
+    <div id="no-keys" class="state" style="display:none;">
+      <p>API keys not configured</p>
+      <button id="open-options" class="link-btn">Set up API keys</button>
+    </div>
+
+    <div class="footer">
+      <button id="options-link" class="link-btn">Settings</button>
+    </div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
