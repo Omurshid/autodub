@@ -1,222 +1,75 @@
 // ============================================================
 // DubIt - Content Script
-// Runs in ALL frames (top + iframes). Only the frame that
-// contains the <video> element handles capture and playback.
+// Runs in ALL frames (top + iframes).
+//
+// Architecture:
+//   - IFRAME (with <video>): handles audio capture only
+//   - TOP FRAME: handles dubbed audio playback + UI overlays
+//
+// This split is necessary because cross-origin iframes block
+// autoplay, so we can't play dubbed audio from inside them.
 // ============================================================
 
 (function () {
   "use strict";
 
-  let dubber = null;
+  const isTopFrame = window === window.top;
 
-  class VideoDubber {
+  // ===========================================================
+  // TOP FRAME — Audio playback + UI
+  // ===========================================================
+  let audioPlayer = null;
+
+  class DubbedAudioPlayer {
     constructor() {
-      this.video = null;
-      this.mediaRecorder = null;
-      this.isActive = false;
-      this.originalMuted = false;
-      this.originalVolume = 1;
-      this.captureMode = null; // "captureStream" | "tabCapture"
-
-      // Dubbed audio playback queue
-      this.dubbedQueue = [];
+      this.queue = [];
       this.currentAudio = null;
       this.isPlaying = false;
-
-      // UI overlays
       this.statusOverlay = null;
       this.subtitleOverlay = null;
       this.styleEl = null;
+      this.injectStyles();
+      this.createSubtitleOverlay();
     }
 
-    // -------------------------------------------------------
-    // Video detection
-    // -------------------------------------------------------
-    findMainVideo() {
-      const videos = Array.from(document.querySelectorAll("video"));
-      if (videos.length === 0) return null;
-
-      return (
-        videos
-          .filter((v) => v.readyState >= 2 || !v.paused)
-          .sort((a, b) => {
-            const ap = !a.paused ? 1 : 0;
-            const bp = !b.paused ? 1 : 0;
-            if (ap !== bp) return bp - ap;
-            return (
-              b.videoWidth * b.videoHeight - a.videoWidth * a.videoHeight
-            );
-          })[0] || videos[0]
-      );
-    }
-
-    // -------------------------------------------------------
-    // Start capturing
-    // -------------------------------------------------------
-    async start(chunkDuration = 5000) {
-      this.video = this.findMainVideo();
-      if (!this.video) {
-        return { success: false, error: "No video found" };
+    enqueue(audioBase64, text) {
+      // Convert base64 to Blob URL (more reliable than data URIs for large audio)
+      const binary = atob(audioBase64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
       }
+      const blob = new Blob([bytes], { type: "audio/mpeg" });
+      const blobUrl = URL.createObjectURL(blob);
 
-      try {
-        // Get media stream from video element
-        const stream = this.video.captureStream
-          ? this.video.captureStream()
-          : this.video.mozCaptureStream();
-
-        const audioTracks = stream.getAudioTracks();
-        if (audioTracks.length === 0) {
-          this.showStatus("No audio track in this video", "error");
-          return { success: false, error: "No audio track" };
-        }
-
-        // Save original audio state so we can restore later
-        this.originalMuted = this.video.muted;
-        this.originalVolume = this.video.volume;
-
-        // Create audio-only stream for recording
-        const audioStream = new MediaStream(audioTracks);
-
-        // Pick best available codec
-        const mimeType = MediaRecorder.isTypeSupported(
-          "audio/webm;codecs=opus"
-        )
-          ? "audio/webm;codecs=opus"
-          : "audio/webm";
-
-        this.mediaRecorder = new MediaRecorder(audioStream, { mimeType });
-
-        this.mediaRecorder.ondataavailable = async (event) => {
-          if (event.data.size > 0 && this.isActive) {
-            const base64 = await this.blobToBase64(event.data);
-            chrome.runtime.sendMessage({
-              type: "AUDIO_CHUNK",
-              data: base64,
-            });
-          }
-        };
-
-        this.mediaRecorder.onerror = (e) => {
-          console.error("[DubIt] MediaRecorder error:", e.error);
-          this.showStatus("Recording error: " + e.error?.message, "error");
-        };
-
-        // Mute original audio — captureStream still gets the audio data
-        this.video.muted = true;
-
-        // Start recording in timed chunks
-        this.mediaRecorder.start(chunkDuration);
-        this.isActive = true;
-        this.captureMode = "captureStream";
-
-        this.injectStyles();
-        this.showStatus("Capturing audio...", "info");
-        this.createSubtitleOverlay();
-
-        // Tell background which frame we're in so it can target us later
-        chrome.runtime.sendMessage({ type: "CAPTURE_STARTED" });
-
-        return { success: true, mode: "captureStream" };
-      } catch (err) {
-        console.error(
-          "[DubIt] captureStream failed, falling back to tabCapture:",
-          err
-        );
-
-        // captureStream failed (DRM / cross-origin) — ask background
-        // to set up tabCapture via offscreen document instead
-        this.isActive = true;
-        this.captureMode = "tabCapture";
-
-        this.injectStyles();
-        this.showStatus("Switching to tab capture...", "info");
-        this.createSubtitleOverlay();
-
-        // Request tabCapture from the service worker
-        const fallbackResult = await new Promise((resolve) => {
-          chrome.runtime.sendMessage(
-            { type: "CAPTURE_FALLBACK", tabId: null },
-            resolve
-          );
-        });
-
-        if (fallbackResult?.error) {
-          this.showStatus(fallbackResult.error, "error");
-          this.isActive = false;
-          return { success: false, error: fallbackResult.error };
-        }
-
-        return { success: true, mode: "tabCapture" };
-      }
-    }
-
-    // -------------------------------------------------------
-    // Stop everything
-    // -------------------------------------------------------
-    stop() {
-      this.isActive = false;
-
-      // Stop recorder (captureStream mode)
-      if (this.mediaRecorder && this.mediaRecorder.state !== "inactive") {
-        this.mediaRecorder.stop();
-      }
-      this.mediaRecorder = null;
-
-      // Restore original audio (only for captureStream — tabCapture
-      // restores automatically when the offscreen doc releases the stream)
-      if (this.video && this.captureMode === "captureStream") {
-        this.video.muted = this.originalMuted;
-        this.video.volume = this.originalVolume;
-      }
-
-      this.captureMode = null;
-
-      // Stop dubbed audio playback
-      if (this.currentAudio) {
-        this.currentAudio.pause();
-        this.currentAudio = null;
-      }
-      this.dubbedQueue = [];
-      this.isPlaying = false;
-
-      // Remove UI
-      this.hideStatus();
-      this.removeSubtitleOverlay();
-      this.removeStyles();
-    }
-
-    // -------------------------------------------------------
-    // Dubbed audio playback
-    // -------------------------------------------------------
-    queueDubbedAudio(audioBase64, text) {
-      this.dubbedQueue.push({ audioBase64, text });
+      this.queue.push({ blobUrl, text });
+      this.showStatus("Dubbing active", "active");
       this.playNext();
     }
 
     playNext() {
-      if (this.isPlaying || this.dubbedQueue.length === 0 || !this.isActive)
-        return;
+      if (this.isPlaying || this.queue.length === 0) return;
 
       this.isPlaying = true;
-      const { audioBase64, text } = this.dubbedQueue.shift();
+      const { blobUrl, text } = this.queue.shift();
 
-      const audio = new Audio(`data:audio/mpeg;base64,${audioBase64}`);
+      const audio = new Audio(blobUrl);
+      audio.volume = 1;
       this.currentAudio = audio;
 
-      // Show translated text as subtitle
       if (text) this.showSubtitle(text);
-      this.showStatus("Dubbing active", "active");
 
       audio.addEventListener("ended", () => {
+        URL.revokeObjectURL(blobUrl);
         this.isPlaying = false;
         this.currentAudio = null;
         this.hideSubtitle();
         this.playNext();
       });
 
-      audio.addEventListener("error", () => {
-        console.error("[DubIt] Dubbed audio playback error");
+      audio.addEventListener("error", (e) => {
+        console.error("[DubIt] Audio playback error:", e);
+        URL.revokeObjectURL(blobUrl);
         this.isPlaying = false;
         this.currentAudio = null;
         this.hideSubtitle();
@@ -224,16 +77,31 @@
       });
 
       audio.play().catch((err) => {
-        console.error("[DubIt] Play failed:", err);
+        console.error("[DubIt] Play failed:", err.name, err.message);
+        this.showStatus(`Play blocked: ${err.message}`, "error");
+        URL.revokeObjectURL(blobUrl);
         this.isPlaying = false;
         this.currentAudio = null;
         this.playNext();
       });
     }
 
-    // -------------------------------------------------------
-    // UI: Status overlay (top-right corner)
-    // -------------------------------------------------------
+    stop() {
+      if (this.currentAudio) {
+        this.currentAudio.pause();
+        this.currentAudio = null;
+      }
+      this.queue.forEach((item) => URL.revokeObjectURL(item.blobUrl));
+      this.queue = [];
+      this.isPlaying = false;
+      this.hideStatus();
+      this.hideSubtitle();
+      this.removeSubtitleOverlay();
+      this.removeStyles();
+    }
+
+    // --- UI ---
+
     showStatus(message, type = "info") {
       if (!this.statusOverlay) {
         this.statusOverlay = document.createElement("div");
@@ -254,8 +122,7 @@
         right: "16px",
         padding: "10px 16px",
         borderRadius: "8px",
-        fontFamily:
-          '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+        fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
         fontSize: "13px",
         fontWeight: "500",
         zIndex: "2147483647",
@@ -286,9 +153,6 @@
       }
     }
 
-    // -------------------------------------------------------
-    // UI: Subtitle overlay (bottom-center)
-    // -------------------------------------------------------
     createSubtitleOverlay() {
       if (this.subtitleOverlay) return;
       this.subtitleOverlay = document.createElement("div");
@@ -303,8 +167,7 @@
         borderRadius: "6px",
         background: "rgba(0, 0, 0, 0.82)",
         color: "#fff",
-        fontFamily:
-          '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+        fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
         fontSize: "16px",
         textAlign: "center",
         zIndex: "2147483647",
@@ -334,9 +197,6 @@
       }
     }
 
-    // -------------------------------------------------------
-    // Injected styles
-    // -------------------------------------------------------
     injectStyles() {
       if (document.getElementById("dubit-injected-styles")) return;
       this.styleEl = document.createElement("style");
@@ -356,10 +216,179 @@
         this.styleEl = null;
       }
     }
+  }
 
-    // -------------------------------------------------------
-    // Utility
-    // -------------------------------------------------------
+  // ===========================================================
+  // IFRAME — Audio capture
+  // ===========================================================
+  let capturer = null;
+
+  class AudioCapturer {
+    constructor() {
+      this.video = null;
+      this.mediaRecorder = null;
+      this.audioStream = null;
+      this.chunkDuration = 5000;
+      this.recorderMimeType = "audio/webm";
+      this.chunkTimer = null;
+      this.isActive = false;
+      this.originalMuted = false;
+      this.originalVolume = 1;
+      this.captureMode = null;
+    }
+
+    findMainVideo() {
+      const videos = Array.from(document.querySelectorAll("video"));
+      if (videos.length === 0) return null;
+
+      return (
+        videos
+          .filter((v) => v.readyState >= 2 || !v.paused)
+          .sort((a, b) => {
+            const ap = !a.paused ? 1 : 0;
+            const bp = !b.paused ? 1 : 0;
+            if (ap !== bp) return bp - ap;
+            return (
+              b.videoWidth * b.videoHeight - a.videoWidth * a.videoHeight
+            );
+          })[0] || videos[0]
+      );
+    }
+
+    async start(chunkDuration = 5000) {
+      this.video = this.findMainVideo();
+      if (!this.video) {
+        return { success: false, error: "No video found" };
+      }
+
+      try {
+        const stream = this.video.captureStream
+          ? this.video.captureStream()
+          : this.video.mozCaptureStream();
+
+        const audioTracks = stream.getAudioTracks();
+        if (audioTracks.length === 0) {
+          return { success: false, error: "No audio track" };
+        }
+
+        this.originalMuted = this.video.muted;
+        this.originalVolume = this.video.volume;
+
+        const audioStream = new MediaStream(audioTracks);
+
+        const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+          ? "audio/webm;codecs=opus"
+          : "audio/webm";
+
+        this.audioStream = audioStream;
+        this.chunkDuration = chunkDuration;
+        this.recorderMimeType = mimeType;
+
+        // Mute original — captureStream still captures audio data
+        this.video.muted = true;
+        this.isActive = true;
+        this.captureMode = "captureStream";
+
+        this.startNextRecording();
+
+        // Tell background which frame we're in
+        try {
+          chrome.runtime.sendMessage({ type: "CAPTURE_STARTED" });
+        } catch {}
+
+        return { success: true, mode: "captureStream" };
+      } catch (err) {
+        console.warn("[DubIt] captureStream failed, trying tabCapture:", err.message);
+
+        this.isActive = true;
+        this.captureMode = "tabCapture";
+
+        try {
+          const result = await new Promise((resolve) => {
+            chrome.runtime.sendMessage(
+              { type: "CAPTURE_FALLBACK", tabId: null },
+              resolve
+            );
+          });
+
+          if (result?.error) {
+            this.isActive = false;
+            return { success: false, error: result.error };
+          }
+
+          return { success: true, mode: "tabCapture" };
+        } catch (fallbackErr) {
+          this.isActive = false;
+          return { success: false, error: fallbackErr.message };
+        }
+      }
+    }
+
+    startNextRecording() {
+      if (!this.isActive || !this.audioStream) return;
+
+      const recorder = new MediaRecorder(this.audioStream, {
+        mimeType: this.recorderMimeType,
+      });
+      this.mediaRecorder = recorder;
+
+      recorder.ondataavailable = async (event) => {
+        if (event.data.size > 0 && this.isActive) {
+          try {
+            const base64 = await this.blobToBase64(event.data);
+            await chrome.runtime.sendMessage({
+              type: "AUDIO_CHUNK",
+              data: base64,
+            });
+          } catch (err) {
+            if (err.message?.includes("Extension context invalidated")) {
+              console.warn("[DubIt] Extension reloaded. Stopping.");
+              this.stop();
+            } else {
+              console.error("[DubIt] Failed to send chunk:", err);
+            }
+          }
+        }
+      };
+
+      recorder.onstop = () => {
+        if (this.isActive) this.startNextRecording();
+      };
+
+      recorder.onerror = (e) => {
+        console.error("[DubIt] MediaRecorder error:", e.error);
+      };
+
+      recorder.start();
+
+      this.chunkTimer = setTimeout(() => {
+        if (recorder.state === "recording") {
+          recorder.stop();
+        }
+      }, this.chunkDuration || 5000);
+    }
+
+    stop() {
+      this.isActive = false;
+
+      if (this.chunkTimer) {
+        clearTimeout(this.chunkTimer);
+        this.chunkTimer = null;
+      }
+
+      if (this.mediaRecorder && this.mediaRecorder.state !== "inactive") {
+        this.mediaRecorder.stop();
+      }
+      this.mediaRecorder = null;
+
+      if (this.video && this.captureMode === "captureStream") {
+        this.video.muted = this.originalMuted;
+        this.video.volume = this.originalVolume;
+      }
+
+      this.captureMode = null;
+    }
+
     blobToBase64(blob) {
       return new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -374,83 +403,85 @@
   // Helpers
   // ===========================================================
   function hasLocalVideo() {
-    const videos = document.querySelectorAll("video");
-    return videos.length > 0;
+    return document.querySelectorAll("video").length > 0;
   }
 
   // ===========================================================
   // Message listener
-  //
-  // With all_frames:true the script runs in EVERY frame.
-  // chrome.tabs.sendMessage delivers to ALL frames in the tab.
-  // Only the first frame to call sendResponse() wins.
-  //
-  // Strategy:
-  //   - CHECK_VIDEO  → only respond if THIS frame has a <video>
-  //   - START_CAPTURE→ only start if THIS frame has a <video>
-  //   - STOP / DUBBED / STATUS → only handle if this is the
-  //     active dubber frame (dubber !== null)
-  //
-  // Frames without video silently ignore messages so the iframe
-  // that actually contains the player gets to respond.
   // ===========================================================
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     switch (msg.type) {
-      // ----- Video detection -----
+      // ----- Video detection (any frame with a video responds) -----
       case "CHECK_VIDEO": {
         if (hasLocalVideo()) {
           sendResponse({ hasVideo: true });
         }
-        // Frames without video: don't respond — let the iframe
-        // that has the video be the one whose response is used.
-        // Return false so Chrome knows we won't respond async.
         return false;
       }
 
-      // ----- Start capture -----
+      // ----- Start capture (only iframe with video) -----
       case "START_CAPTURE": {
-        // Only the frame with a video should attempt capture
         if (!hasLocalVideo()) return false;
-
-        if (!dubber) dubber = new VideoDubber();
-        dubber.start(msg.chunkDuration || 5000).then(sendResponse);
-        return true; // async
+        if (!capturer) capturer = new AudioCapturer();
+        capturer.start(msg.chunkDuration || 5000).then((result) => {
+          // Notify top frame to show status
+          try {
+            chrome.runtime.sendMessage({
+              type: "RELAY_STATUS",
+              message: result.success
+                ? "Capturing audio..."
+                : result.error || "Capture failed",
+              statusType: result.success ? "info" : "error",
+            });
+          } catch {}
+          sendResponse(result);
+        });
+        return true;
       }
 
-      // ----- Stop capture -----
+      // ----- Stop capture (iframe) -----
       case "STOP_CAPTURE": {
-        if (dubber) {
-          dubber.stop();
-          dubber = null;
+        if (capturer) {
+          capturer.stop();
+          capturer = null;
           sendResponse({ success: true });
         }
+        // Top frame: stop player
+        if (isTopFrame && audioPlayer) {
+          audioPlayer.stop();
+          audioPlayer = null;
+        }
         return false;
       }
 
-      // ----- Receive dubbed audio -----
+      // ----- Dubbed audio playback (TOP FRAME ONLY) -----
       case "DUBBED_AUDIO": {
-        if (dubber) {
-          dubber.queueDubbedAudio(msg.data, msg.text);
-          sendResponse({ ok: true });
-        }
+        if (!isTopFrame) return false;
+        if (!audioPlayer) audioPlayer = new DubbedAudioPlayer();
+        audioPlayer.enqueue(msg.data, msg.text);
+        sendResponse({ ok: true });
         return false;
       }
 
-      // ----- Status updates from service worker -----
-      case "STATUS_UPDATE": {
-        if (dubber) {
-          dubber.showStatus(msg.message, msg.type || "info");
-          sendResponse({ ok: true });
-        }
+      // ----- Status updates (TOP FRAME shows UI) -----
+      case "STATUS_UPDATE":
+      case "RELAY_STATUS": {
+        if (!isTopFrame) return false;
+        if (!audioPlayer) audioPlayer = new DubbedAudioPlayer();
+        audioPlayer.showStatus(
+          msg.message,
+          msg.statusType || msg.type || "info"
+        );
+        sendResponse({ ok: true });
         return false;
       }
 
-      // ----- Errors -----
+      // ----- Errors (TOP FRAME shows UI) -----
       case "DUBBING_ERROR": {
-        if (dubber) {
-          dubber.showStatus(msg.message, "error");
-          sendResponse({ ok: true });
-        }
+        if (!isTopFrame) return false;
+        if (!audioPlayer) audioPlayer = new DubbedAudioPlayer();
+        audioPlayer.showStatus(msg.message, "error");
+        sendResponse({ ok: true });
         return false;
       }
     }

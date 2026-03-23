@@ -48,10 +48,17 @@ async function handleMessage(message, sender) {
       return { queued: true };
     case "CAPTURE_FALLBACK":
       // Content script's captureStream failed — switch to tabCapture.
-      // Use sender.tab.id (the real tab ID) since the content script sends tabId: null.
-      // Also store sender.frameId so we can target the correct iframe later.
       state.frameId = sender.frameId;
       return setupTabCapture(sender.tab.id);
+    case "RELAY_STATUS":
+      // Iframe content script wants to show status on the top frame
+      if (sender.tab?.id) {
+        notifyTab(sender.tab.id, "STATUS_UPDATE", {
+          message: message.message,
+          statusType: message.statusType || "info",
+        });
+      }
+      return { ok: true };
     default:
       return { error: "Unknown message type" };
   }
@@ -292,14 +299,15 @@ async function processNextChunk() {
         } catch {}
       }
 
-      const sendOpts = state.frameId != null ? { frameId: state.frameId } : {};
+      // Always send dubbed audio to the TOP FRAME (frameId: 0) for playback.
+      // Cross-origin iframes block autoplay, so only the top frame can play audio.
       chrome.tabs.sendMessage(tabId, {
         type: "DUBBED_AUDIO",
         data: result.audioBase64,
         text: result.translatedText,
         originalText: result.originalText,
         language: result.language,
-      }, sendOpts);
+      }, { frameId: 0 });
     }
   } catch (err) {
     console.error("Pipeline error:", err);
@@ -535,9 +543,9 @@ function getSettings() {
 // -----------------------------------------------------------
 function notifyTab(tabId, type, payload) {
   if (!tabId) return;
-  const opts = state.frameId != null ? { frameId: state.frameId } : {};
+  // Send status to the top frame (where UI overlays are displayed)
   try {
-    chrome.tabs.sendMessage(tabId, { type, ...payload }, opts);
+    chrome.tabs.sendMessage(tabId, { type, ...payload }, { frameId: 0 });
   } catch {}
 }
 
