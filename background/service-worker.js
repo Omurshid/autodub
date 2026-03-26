@@ -1,6 +1,6 @@
 // ============================================================
 // DubIt - Background Service Worker
-// Pipeline: Audio Capture → Whisper STT → GPT Translate → ElevenLabs Voice Clone + TTS
+// Pipeline: Audio Capture → Insanely Fast Whisper (local) → GPT Translate → ElevenLabs Voice Clone + TTS
 // ============================================================
 
 const state = {
@@ -69,9 +69,14 @@ async function handleMessage(message, sender) {
 // -----------------------------------------------------------
 async function startDubbing(tabId) {
   const keys = await getApiKeys();
-  if (!keys.elevenlabs || !keys.openai) {
+  if (!keys.elevenlabs) {
     return {
-      error: "API keys not configured. Open extension settings to add them.",
+      error: "ElevenLabs API key not configured. Open extension settings to add it.",
+    };
+  }
+  if (!keys.whisperServer) {
+    return {
+      error: "Whisper server URL not configured. Open extension settings to add it.",
     };
   }
 
@@ -327,8 +332,8 @@ async function processNextChunk() {
 async function dubbingPipeline(audioBase64) {
   const keys = await getApiKeys();
 
-  // Step 1: Transcribe with Whisper
-  const transcription = await transcribeWithWhisper(audioBase64, keys.openai);
+  // Step 1: Transcribe with local Insanely Fast Whisper server
+  const transcription = await transcribeWithWhisper(audioBase64, keys.whisperServer);
 
   if (!transcription.text || transcription.text.trim() === "") {
     return null; // silence / no speech
@@ -362,24 +367,23 @@ async function dubbingPipeline(audioBase64) {
 }
 
 // -----------------------------------------------------------
-// Whisper transcription
+// Whisper transcription (local Insanely Fast Whisper server)
 // -----------------------------------------------------------
-async function transcribeWithWhisper(audioBase64, apiKey) {
+async function transcribeWithWhisper(audioBase64, serverUrl) {
   const blob = base64ToBlob(audioBase64, "audio/webm");
   const formData = new FormData();
   formData.append("file", blob, "chunk.webm");
-  formData.append("model", "whisper-1");
-  formData.append("response_format", "verbose_json");
 
-  const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+  const url = serverUrl.replace(/\/+$/, "") + "/v1/audio/transcriptions";
+
+  const res = await fetch(url, {
     method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}` },
     body: formData,
   });
 
   if (!res.ok) {
     const errText = await res.text();
-    throw new Error(`Whisper error ${res.status}: ${errText}`);
+    throw new Error(`Whisper server error ${res.status}: ${errText}`);
   }
 
   const data = await res.json();
@@ -514,10 +518,11 @@ async function deleteClonedVoice(voiceId) {
 // -----------------------------------------------------------
 function getApiKeys() {
   return new Promise((resolve) => {
-    chrome.storage.sync.get(["elevenlabs_key", "openai_key"], (result) => {
+    chrome.storage.sync.get(["elevenlabs_key", "openai_key", "whisper_server_url"], (result) => {
       resolve({
         elevenlabs: result.elevenlabs_key || "",
         openai: result.openai_key || "",
+        whisperServer: result.whisper_server_url || "",
       });
     });
   });

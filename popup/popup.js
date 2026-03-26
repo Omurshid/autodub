@@ -12,8 +12,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   let isActive = false;
 
   // Check API keys
-  const keys = await chrome.storage.sync.get(["elevenlabs_key", "openai_key"]);
-  const hasKeys = keys.elevenlabs_key && keys.openai_key;
+  const keys = await chrome.storage.sync.get(["elevenlabs_key", "whisper_server_url"]);
+  const hasKeys = keys.elevenlabs_key && keys.whisper_server_url;
 
   if (!hasKeys) {
     mainControls.style.display = "none";

@@ -119,6 +119,14 @@
     a { color: #6366f1; text-decoration: none; }
     a:hover { text-decoration: underline; }
 
+    code {
+      background: #2a2a4a;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-family: "SF Mono", "Fira Code", monospace;
+    }
+
     .test-btn {
       width: 100%;
       padding: 12px;
@@ -169,8 +177,19 @@
     </div>
 
     <div class="section">
+      <h2>Whisper Server (Insanely Fast Whisper)</h2>
+      <p>Local transcription server. Run <code>python server/transcription_server.py</code> to start.
+        See <a href="https://github.com/Vaibhavs10/insanely-fast-whisper" target="_blank">insanely-fast-whisper</a> for details.
+      </p>
+      <div class="field">
+        <label for="whisper-server-url">Server URL</label>
+        <input type="text" id="whisper-server-url" placeholder="http://localhost:9000">
+      </div>
+    </div>
+
+    <div class="section">
       <h2>OpenAI</h2>
-      <p>Whisper transcription &amp; GPT translation. Get your key from
+      <p>GPT translation (only needed for non-English videos). Get your key from
         <a href="https://platform.openai.com/api-keys" target="_blank">platform.openai.com</a>
       </p>
       <div class="field">
