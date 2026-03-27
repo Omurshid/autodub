@@ -110,9 +110,9 @@
       }
 
       const colors = {
-        info: { bg: "#1a1a2e", text: "#e0e0ff", dot: "#6366f1" },
-        active: { bg: "#0d2818", text: "#bbf7d0", dot: "#22c55e" },
-        error: { bg: "#2e1a1a", text: "#fecaca", dot: "#ef4444" },
+        info: { bg: "#12121e", text: "#e8e8f8", dot: "#7b61ff" },
+        active: { bg: "#0a1f16", text: "#a7f3d0", dot: "#00d98b" },
+        error: { bg: "#1f0a0a", text: "#fecaca", dot: "#e84040" },
       };
       const c = colors[type] || colors.info;
 
@@ -126,7 +126,7 @@
         fontSize: "13px",
         fontWeight: "500",
         zIndex: "2147483647",
-        boxShadow: "0 4px 12px rgba(0,0,0,0.4)",
+        boxShadow: "0 4px 16px rgba(0,0,0,0.6)",
         display: "flex",
         alignItems: "center",
         gap: "8px",
