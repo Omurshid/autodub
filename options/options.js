@@ -1,6 +1,7 @@
 document.addEventListener("DOMContentLoaded", async () => {
   const fields = {
     elevenlabs_key: document.getElementById("elevenlabs-key"),
+    whisper_server_url: document.getElementById("whisper-server-url"),
     openai_key: document.getElementById("openai-key"),
     chunk_duration: document.getElementById("chunk-duration"),
     voice_stability: document.getElementById("voice-stability"),
@@ -39,7 +40,26 @@ document.addEventListener("DOMContentLoaded", async () => {
     testResults.innerHTML = "";
     testResults.style.display = "block";
 
-    // Test OpenAI
+    // Test Whisper server
+    const whisperUrl = fields.whisper_server_url.value.trim();
+    if (whisperUrl) {
+      addResult("⏳ Testing Whisper server...");
+      try {
+        const res = await fetch(whisperUrl.replace(/\/+$/, "") + "/health");
+        if (res.ok) {
+          const data = await res.json();
+          addResult(`✅ Whisper server is running! (model: ${data.model})`, "success");
+        } else {
+          addResult(`❌ Whisper server responded with ${res.status}`, "error");
+        }
+      } catch (e) {
+        addResult(`❌ Whisper server not reachable: ${e.message}`, "error");
+      }
+    } else {
+      addResult("⚠️ No Whisper server URL entered", "warn");
+    }
+
+    // Test OpenAI (optional — only needed for translation)
     if (openaiKey) {
       addResult("⏳ Testing OpenAI key...");
       try {
@@ -56,7 +76,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         addResult(`❌ OpenAI request failed: ${e.message}`, "error");
       }
     } else {
-      addResult("⚠️ No OpenAI key entered", "warn");
+      addResult("⚠️ No OpenAI key entered (only needed for non-English translation)", "warn");
     }
 
     // Test ElevenLabs
